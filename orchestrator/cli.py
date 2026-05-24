@@ -161,26 +161,41 @@ def _cmd_validate(args):
 
 
 def _cmd_status(args):
-    import json
+    """Status surface — one-shot, single-line, or live --watch (#127)."""
+    import time as _time
+    from orchestrator.status import (
+        format_one_liner,
+        format_watch_panel,
+        read_status_snapshot,
+    )
 
     work_dir = resolve_work_dir(args.target)
-    state_file = work_dir / "state.json"
-    if not state_file.exists():
+    if not (work_dir / "state.json").exists():
         print(f"Error: no state.json at {work_dir}", file=sys.stderr)
         sys.exit(1)
 
-    state = json.loads(state_file.read_text())
-    ledger = json.loads((work_dir / "ledger.json").read_text()) if (work_dir / "ledger.json").exists() else {"iterations": []}
-    principles = json.loads((work_dir / "principles.json").read_text()) if (work_dir / "principles.json").exists() else {"principles": []}
+    if getattr(args, "line", False):
+        print(format_one_liner(read_status_snapshot(work_dir)))
+        return
 
-    active_principles = [p for p in principles.get("principles", []) if p.get("status") == "active"]
-    completed = [it for it in ledger.get("iterations", []) if it.get("iteration", 0) > 0]
+    if getattr(args, "watch", False):
+        try:
+            while True:
+                snap = read_status_snapshot(work_dir)
+                # Clear screen + home cursor (ANSI). Falls back gracefully
+                # in non-tty contexts to a separator line.
+                if sys.stdout.isatty():
+                    sys.stdout.write("\033[2J\033[H")
+                else:
+                    sys.stdout.write("\n" + "─" * 60 + "\n")
+                sys.stdout.write(format_watch_panel(snap) + "\n")
+                sys.stdout.flush()
+                _time.sleep(args.interval if args.interval > 0 else 2)
+        except KeyboardInterrupt:
+            print()
+            return
 
-    print(f"Campaign:    {state.get('run_id', '?')}")
-    print(f"Phase:       {state.get('phase', '?')}")
-    print(f"Iteration:   {state.get('iteration', '?')}")
-    print(f"Completed:   {len(completed)} iteration(s)")
-    print(f"Principles:  {len(active_principles)} active")
+    print(format_watch_panel(read_status_snapshot(work_dir)))
 
 
 def _cmd_cost(args):
@@ -205,6 +220,11 @@ def _cmd_cost(args):
         print(f"\nBy phase:")
         for phase, b in s["by_phase"].items():
             print(f"  {phase:20s}  {b['calls']} calls  ${b['cost_usd']:.4f}  {b['input_tokens']+b['output_tokens']} tok")
+
+    if getattr(args, "cache_stats", False):
+        from orchestrator.cache_stats import cache_stats, format_cache_stats
+        print("\nCache stats:")
+        print(format_cache_stats(cache_stats(metrics_path)))
 
 
 def _cmd_report(args):
@@ -310,7 +330,7 @@ def main():
     p_run.add_argument("--auto-approve", action="store_true")
     p_run.add_argument("--timeout", type=int, default=1800)
     p_run.add_argument("--max-cli-retries", type=int, default=10)
-    p_run.add_argument("--agent", choices=["inline", "api"], default="api")
+    p_run.add_argument("--agent", choices=["inline", "api", "sdk"], default="api")
     p_run.set_defaults(func=_cmd_run)
 
     p_resume = subparsers.add_parser("resume")
@@ -320,7 +340,7 @@ def main():
     p_resume.add_argument("--auto-approve", action="store_true")
     p_resume.add_argument("--timeout", type=int, default=1800)
     p_resume.add_argument("--max-cli-retries", type=int, default=10)
-    p_resume.add_argument("--agent", choices=["inline", "api"], default="api")
+    p_resume.add_argument("--agent", choices=["inline", "api", "sdk"], default="api")
     p_resume.set_defaults(func=_cmd_resume)
 
     p_validate = subparsers.add_parser("validate")
@@ -330,17 +350,33 @@ def main():
 
     p_status = subparsers.add_parser("status")
     p_status.add_argument("target")
+    p_status.add_argument(
+        "--watch", action="store_true",
+        help="Loop and redraw every --interval seconds (#127).",
+    )
+    p_status.add_argument(
+        "--line", action="store_true",
+        help="Print a single-line summary suitable for shell prompts (#127).",
+    )
+    p_status.add_argument(
+        "--interval", type=float, default=2.0,
+        help="Watch redraw interval in seconds (default: 2).",
+    )
     p_status.set_defaults(func=_cmd_status)
 
     p_cost = subparsers.add_parser("cost")
     p_cost.add_argument("target")
+    p_cost.add_argument(
+        "--cache-stats", action="store_true",
+        help="Include prompt-cache hit-rate stats (#122).",
+    )
     p_cost.set_defaults(func=_cmd_cost)
 
     p_report = subparsers.add_parser("report")
     p_report.add_argument("target")
     p_report.add_argument("--model")
     p_report.add_argument("--timeout", type=int, default=1800)
-    p_report.add_argument("--agent", choices=["inline", "api"], default="api")
+    p_report.add_argument("--agent", choices=["inline", "api", "sdk"], default="api")
     p_report.set_defaults(func=_cmd_report)
 
     p_replay = subparsers.add_parser("replay")

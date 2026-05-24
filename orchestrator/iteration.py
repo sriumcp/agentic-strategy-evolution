@@ -193,7 +193,17 @@ def setup_work_dir(run_id: str, repo_path: str | None = None) -> Path:
     If repo_path is provided, the campaign directory is created inside
     the target repo at .nous/<run_id>/. Otherwise falls back to creating
     <run_id>/ in the current directory.
+
+    Also writes a per-campaign ``.claude/settings.json`` permission policy
+    (issue #135) so dispatchers can pass ``--settings <path>`` instead of
+    ``--dangerously-skip-permissions``.
     """
+    from orchestrator.settings_template import (
+        render_campaign_settings,
+        settings_path_for,
+        write_campaign_settings,
+    )
+
     if repo_path:
         work_dir = Path(repo_path) / ".nous" / run_id
     else:
@@ -206,13 +216,35 @@ def setup_work_dir(run_id: str, repo_path: str | None = None) -> Path:
     state = json.loads((work_dir / "state.json").read_text())
     state["run_id"] = run_id
     atomic_write(work_dir / "state.json", json.dumps(state, indent=2) + "\n")
+
+    # Per-campaign permission policy. Idempotent: don't overwrite a settings
+    # file the user has hand-edited.
+    settings_path = settings_path_for(work_dir)
+    if not settings_path.exists():
+        bin_dir = Path(__file__).resolve().parent.parent / "bin"
+        stop_hook = bin_dir / "nous-execute-stop"
+        plan_enforcer = bin_dir / "nous-plan-enforcer"
+        settings = render_campaign_settings(
+            work_dir=work_dir,
+            repo_path=Path(repo_path) if repo_path else None,
+            stop_hook_path=stop_hook if stop_hook.exists() else None,
+            pre_tool_use_hook_path=plan_enforcer if plan_enforcer.exists() else None,
+        )
+        write_campaign_settings(settings_path, settings)
+
     return work_dir
 
 
 def _generate_gate_summary(
     dispatcher, iter_dir: Path, iteration: int, gate_type: str,
+    *, campaign: dict | None = None,
 ) -> Path | None:
-    """Generate a gate summary file. Returns the path, or None on failure."""
+    """Generate a gate summary file. Returns the path, or None on failure.
+
+    When ``campaign`` is provided and contains a non-empty ``channels`` list,
+    also fires off a per-channel notification (#130) with the rendered
+    summary. Channel failures are logged at warning and never block the gate.
+    """
     summary_path = iter_dir / f"gate_summary_{gate_type}.json"
     try:
         dispatcher.dispatch(
@@ -221,12 +253,32 @@ def _generate_gate_summary(
             iteration=iteration,
             perspective=gate_type,
         )
-        return summary_path
     except (RuntimeError, FileNotFoundError, OSError) as exc:
         logger = logging.getLogger(__name__)
         logger.warning("Gate summary generation failed: %s", exc)
         print(f"  (Gate summary skipped: {exc})")
         return None
+
+    # Channel notification (#130 Phase A): outbound only; the campaign still
+    # blocks on terminal input for the actual decision.
+    if campaign:
+        channels = campaign.get("channels")
+        if channels:
+            try:
+                from orchestrator.channels import notify_gate
+                summary = json.loads(summary_path.read_text())
+                results = notify_gate(
+                    channels, summary=summary, gate_type=gate_type,
+                    iter_dir=iter_dir,
+                )
+                ok = sum(1 for r in results if r.get("ok"))
+                if ok:
+                    print(f"  (notified {ok}/{len(results)} channel(s))")
+            except (json.JSONDecodeError, OSError, RuntimeError) as exc:
+                logger = logging.getLogger(__name__)
+                logger.warning("Channel notification failed: %s", exc)
+
+    return summary_path
 
 
 def run_iteration(
@@ -281,9 +333,15 @@ def run_iteration(
         cli_dispatcher = inline_dispatcher
         llm_dispatcher = inline_dispatcher
     else:
-        # API mode: CLIDispatcher for code-access roles only (when repo_path is set)
+        # API or SDK mode: code-access dispatcher only when repo_path is set.
+        # SDK uses claude-agent-sdk; api uses the claude -p subprocess (CLIDispatcher).
+        if agent == "sdk":
+            from orchestrator.sdk_dispatch import SDKDispatcher
+            code_dispatcher_cls = SDKDispatcher
+        else:
+            code_dispatcher_cls = CLIDispatcher
         cli_dispatcher = (
-            CLIDispatcher(
+            code_dispatcher_cls(
                 work_dir=work_dir, campaign=campaign,
                 model=_model_for("design"), timeout=timeout,
                 max_turns=_max_turns_for("design"),
@@ -345,7 +403,7 @@ def run_iteration(
         print(f"\n{'='*60}")
         print(f"  HUMAN DESIGN GATE")
         print(f"{'='*60}")
-        summary_path = _generate_gate_summary(llm_dispatcher, iter_dir, iteration, "design")
+        summary_path = _generate_gate_summary(llm_dispatcher, iter_dir, iteration, "design", campaign=campaign)
         decision, reason = gate.prompt(
             "Review the hypothesis bundle. Approve?",
             summary_path=str(summary_path) if summary_path else None,
@@ -445,7 +503,7 @@ def run_iteration(
         print(f"\n{'='*60}")
         print(f"  HUMAN FINDINGS GATE")
         print(f"{'='*60}")
-        summary_path = _generate_gate_summary(llm_dispatcher, iter_dir, iteration, "findings")
+        summary_path = _generate_gate_summary(llm_dispatcher, iter_dir, iteration, "findings", campaign=campaign)
         decision, reason = gate.prompt(
             "Review the findings. Approve?",
             summary_path=str(summary_path) if summary_path else None,
@@ -463,6 +521,16 @@ def run_iteration(
     # ─── PRINCIPLE MERGE (Python, no LLM) ─────────────────────────────────
     _merge_principles(work_dir, iter_dir)
     print(f"  -> Principles merged into {work_dir / 'principles.json'}")
+
+    # ─── CLAUDE.md REGENERATE (Python, no LLM) — issue #131 ───────────────
+    # Refresh per-campaign CLAUDE.md so the next iteration's session loads
+    # the updated principles + handoff via Claude Code's auto-context loading.
+    try:
+        from orchestrator.claude_md import regenerate_from_disk
+        regenerate_from_disk(work_dir, campaign, iteration=iteration)
+    except (OSError, RuntimeError) as exc:
+        # Best-effort: a CLAUDE.md write failure shouldn't abort the iteration.
+        logger.warning("Failed to regenerate CLAUDE.md: %s", exc)
 
     if final:
         engine.transition("DONE")
@@ -493,7 +561,7 @@ def main() -> None:
                         help="Timeout in seconds for claude -p calls (default: 1800)")
     parser.add_argument("--max-cli-retries", type=int, default=10,
                         help="Max retries for claude -p failures (-1 = unbounded, default: 10)")
-    parser.add_argument("--agent", choices=["inline", "api"], default="api",
+    parser.add_argument("--agent", choices=["inline", "api", "sdk"], default="api",
                         help="Dispatch backend: 'inline' emits prompts to stdout for the "
                              "calling agent, 'api' uses the LLM API (default: api)")
     parser.add_argument("-v", "--verbose", action="store_true",

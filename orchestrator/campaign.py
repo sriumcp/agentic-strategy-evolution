@@ -206,15 +206,38 @@ def run_campaign(
         HumanGate(auto_response="approve") if auto_approve else HumanGate()
     )
 
-    # Pre-flight: validate CLI + credentials before starting the campaign
+    # GC orphan experiment worktrees (#133): clean up stale dirs from
+    # crashed prior runs before starting fresh ones.
     repo_path = campaign.get("target_system", {}).get("repo_path")
+    if repo_path:
+        try:
+            from orchestrator.worktree import gc_orphan_worktrees
+            removed = gc_orphan_worktrees(Path(repo_path))
+            if removed:
+                logger.info(
+                    "GC'd %d orphan worktree(s): %s",
+                    len(removed), ", ".join(removed),
+                )
+        except (OSError, RuntimeError) as exc:
+            logger.warning("Worktree GC failed: %s", exc)
+
+    # Pre-flight: validate CLI + credentials before starting the campaign.
+    # SDK mode pre-flights via claude-agent-sdk import; API mode via claude CLI.
     if agent != "inline" and repo_path:
-        from orchestrator.cli_dispatch import CLIDispatcher
-        preflight_dispatcher = CLIDispatcher(
-            work_dir=work_dir, campaign=campaign,
-            model=_resolve_model(campaign, "design", model),
-            max_retries=max_cli_retries,
-        )
+        if agent == "sdk":
+            from orchestrator.sdk_dispatch import SDKDispatcher
+            preflight_dispatcher = SDKDispatcher(
+                work_dir=work_dir, campaign=campaign,
+                model=_resolve_model(campaign, "design", model),
+                max_retries=max_cli_retries,
+            )
+        else:
+            from orchestrator.cli_dispatch import CLIDispatcher
+            preflight_dispatcher = CLIDispatcher(
+                work_dir=work_dir, campaign=campaign,
+                model=_resolve_model(campaign, "design", model),
+                max_retries=max_cli_retries,
+            )
         preflight_dispatcher.preflight_check()
 
     start_iter = _resume_completed_campaign(work_dir, max_iterations)
@@ -353,7 +376,7 @@ def main() -> None:
                         help="Timeout in seconds for claude -p calls (default: 1800)")
     parser.add_argument("--max-cli-retries", type=int, default=10,
                         help="Max retries for claude -p failures (-1 = unbounded, default: 10)")
-    parser.add_argument("--agent", choices=["inline", "api"], default="api",
+    parser.add_argument("--agent", choices=["inline", "api", "sdk"], default="api",
                         help="Dispatch backend: 'inline' emits prompts to stdout for the "
                              "calling agent (no subprocess, no API key), "
                              "'api' uses the LLM API (default: api)")
@@ -396,6 +419,14 @@ def main() -> None:
     work_dir = setup_work_dir(run_id, repo_path=repo_path)
     print(f"Working directory: {work_dir.resolve()}")
     print(f"Max iterations: {max_iter}")
+
+    # Initial CLAUDE.md so iter 1 has campaign brief + (empty) principles
+    # in scope from session start (#131).
+    try:
+        from orchestrator.claude_md import regenerate_from_disk
+        regenerate_from_disk(work_dir, campaign, iteration=0)
+    except (OSError, RuntimeError) as exc:
+        logger.warning("Failed to write initial CLAUDE.md: %s", exc)
 
     run_campaign(
         campaign, work_dir,
