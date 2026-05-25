@@ -274,6 +274,56 @@ search; the engine continues toward that goal regardless. The
 HUMAN_FINDINGS_GATE is the only path to DONE, so stopping is always
 a deliberate human decision, not a silent drop on REFUTE.
 
+## External theory grounding (issue #88)
+
+If `campaign.yaml` declares `theory_references`, read them as
+authoritative external grounding for your ground truths. Each entry
+names a theorem (e.g. Little's Law, M/G/K stability bound, PASTA) and
+optionally describes *how* to apply it.
+
+When designing an arm's `ground_truth` block (issue #85):
+  * Prefer a ground truth derived from a `theory_references` entry
+    over one invented from the detector itself. The theorem is
+    independent of the detector; "completion fraction below
+    threshold" usually isn't.
+  * Cite the specific reference name in `ground_truth.independence_argument`
+    so the human gate can verify the chain of reasoning.
+
+If no `theory_references` are declared and you're testing a
+quantitative detector, ask whether you can defend any external
+ground truth at all — if not, your experiment is at risk of being
+tautological (the `composite-saturation-detection` failure mode from
+#84). Surface this concern in `problem.md` rather than silently
+inventing a self-referential check.
+
+## Empirical content vs. mathematical identity (issue #86)
+
+When extracting principles from findings, label each one with
+`empirical_content` (bool) and `derivation_type` (one of
+`empirical | algebraic | definitional`):
+
+  * `empirical_content: true`, `derivation_type: empirical` — the
+    experiments could have falsified this. Genuine discovery.
+    Example: *"Under bursty arrivals (CV=7), the detector misclassifies
+    33% of the time."*
+  * `empirical_content: false`, `derivation_type: algebraic` — the
+    statement follows from math. Example: *"CC_RD > 1.0 iff
+    completion_fraction < 1 - 1/√N"* — that's algebra, not data.
+  * `empirical_content: false`, `derivation_type: definitional` — the
+    statement restates a definition.
+
+**Decision rule:** before writing each principle, ask: *"If my
+experiments had returned different numbers, could this principle have
+been false?"*  If YES ⇒ empirical. If NO ⇒ algebraic or definitional.
+
+Why it matters: mathematical identities always hold across all
+experiments (obviously — they're math), so they look like the
+strongest principles. But they teach nothing about whether the
+system works. Marking them as `empirical_content: false` keeps the
+next iteration's designer from treating them as evidence of a
+working detector — see `composite-sensitivity-boundary` principle
+RP-9 for the failure mode this prevents.
+
 ## Constraints
 
 - Do NOT violate active principles.
