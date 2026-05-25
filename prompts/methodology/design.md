@@ -77,6 +77,31 @@ $ grep -n "evict" src/cache.go
 
 Every command and file format in your design must come from something you observed — not assumed.
 
+## Repo Knowledge Cache — read this BEFORE rediscovering (issue #156)
+
+If `.nous/repo/` exists in the target repo, it contains a cache from a
+prior campaign:
+
+- `.nous/repo/exploration.md` — narrative tour of the codebase.
+- `.nous/repo/knobs.yaml` — discovered tunables (name, location, type, range).
+- `.nous/repo/metrics.yaml` — observable metrics and how to capture them.
+- `.nous/repo/build.yaml` — build/test/run commands and prerequisites.
+
+**Read those files first.** They are the cheapest way to learn the
+factual layer of the repo (paths, commands, knob locations) — much
+cheaper than a fresh Explore pass. Use them as a starting point.
+
+**Verify before trusting**: the cache may be stale. For each claim you
+plan to act on (a knob location, a build command, a metric source),
+do one targeted check (`Read`, `Bash --version`, `git log --oneline -1
+<file>`) to confirm the claim still holds at the current sha. If a
+claim has rotted, ignore it and re-discover that specific item.
+**Do NOT** re-walk the whole codebase if the cache exists — verify
+the bits you'll use, then proceed.
+
+The cache is advisory, never authoritative. Today's Explore work
+benefits next campaign's planner the same way.
+
 ## Instructions — Phase 1: Explore and Validate
 
 Before designing anything, ground yourself in the real system:
@@ -142,15 +167,40 @@ Now design a hypothesis bundle based on what you actually observed and verified:
    - `h-ablation`: Remove one component to test if it's necessary.
    - `h-robustness`: Test under varied conditions.
    - `h-super-additivity`: Test whether combined factors produce more than the sum of parts.
+   - `h-dose-response` *(issue #157)*: Vary a continuous knob across **>= 3 distinct values** and predict the **shape** of the metric response (`monotone_decreasing`, `monotone_increasing`, `u_shaped`, `inverted_u`, `saturating`, or `flat`). Use this when the natural question is "how should this knob be set" — not just "does this knob matter at value X". Required fields: `knob`, `values` (>= 3 distinct), `metric`, `expected_shape`.
+   - `h-tradeoff` *(issue #158)*: Declare an intervention's improvement on `metric` AND the maximum acceptable degradation in `secondary_metric` (cost). Use whenever the natural intuition is "but at what cost?" — caching (memory↑), parallelism (CPU↑), accuracy↔speed dials. If you can't name the suspected cost, the intervention isn't well understood enough to test. Required fields: `metric`, `secondary_metric` (must differ from `metric`), `secondary_budget` (max acceptable degradation, >= 0), `secondary_direction` (`increase` if "worse" means going up, `decrease` if going down). Optionally: `primary_change` (predicted directional change), `intervention_ref` (other arm id).
 
    Include a brief note explaining which arms you chose and why.
 
 3. Each arm must have:
-   - `type`: One of h-main, h-ablation, h-super-additivity, h-control-negative, h-robustness.
+   - `type`: One of h-main, h-ablation, h-super-additivity, h-control-negative, h-robustness, h-dose-response, h-tradeoff.
    - `prediction`: A **directional**, falsifiable claim referencing observable metrics. State the expected direction and relative magnitude (e.g., "increasing X will decrease Y consistently across seeds"). Do NOT invent arbitrary numeric thresholds (e.g., ">10% improvement") unless the campaign.yaml specifies one. The hypothesis bundle's multi-seed design tests significance — your prediction tests direction and mechanism.
    - `mechanism`: A causal explanation grounded in the code you read.
    - `diagnostic`: What to investigate if the prediction is wrong.
    - `code_changes` *(optional)*: Include when the arm tests an algorithmic change rather than a flag/config variation. Each entry needs `file`, `intent` (plain English, not a patch), and `rationale`. The EXECUTE_ANALYZE agent will later turn each intent into a patch. If the hypothesis only varies existing CLI flags, omit this field.
+
+## Complexity tier (issue #159)
+
+Each bundle declares an optional `complexity_tier` (1..4) and a
+`tier_justification`:
+
+| Tier | When to use it |
+|---|---|
+| 1 | single mechanism, single knob, treatment vs control |
+| 2 | single mechanism + multi-knob OR ablation OR dose-response on one knob |
+| 3 | multi-mechanism interactions, super-additivity, dose-response across knobs |
+| 4 | cross-system / cross-workload generalization, robustness across regimes |
+
+**Rule: iteration N may use any tier ≤ N.** So iter 1 must be tier 1;
+iter 2 may be tier 1 or 2; etc. Choose the lowest tier that has not
+yet been refuted or shown insufficient by earlier iterations. State
+your tier and a one-line `tier_justification` ("iter 1, simplest
+mechanism" or "iter 3 — tier 1 was refuted in iter-1, tier 2 was
+inconclusive in iter-2, escalating to multi-mechanism").
+
+The design gate flags jumps of more than one tier across iterations.
+This is for visibility, not enforcement — but if you're escalating
+without a refutation to point at, the human will ask why.
 
 ## Constraints
 

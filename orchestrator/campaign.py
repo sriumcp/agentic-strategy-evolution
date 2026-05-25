@@ -61,6 +61,74 @@ def _resolve_model(campaign: dict, phase_key: str, cli_model: str | None) -> str
     return cli_model or "aws/claude-sonnet-4-5"
 
 
+def _write_repo_cache(work_dir: Path, campaign: dict) -> None:
+    """Persist repo-level knowledge cache for the next campaign (issue #156).
+
+    Pure-Python: reads handoff.md + campaign.yaml and writes the cache
+    files. Skipped when there's no target_system.repo_path (no place
+    to put the cache). Best-effort — failures are logged, not fatal.
+    """
+    target = campaign.get("target_system", {}) if isinstance(campaign, dict) else {}
+    repo_path = target.get("repo_path")
+    if not repo_path:
+        return
+    try:
+        from orchestrator.repo_cache import (
+            build_cache_from_campaign,
+            write_repo_cache,
+        )
+        exploration, knobs, metrics, build = build_cache_from_campaign(
+            work_dir, campaign,
+        )
+        if not (exploration or knobs or metrics or build):
+            logger.info("No cache content extracted; skipping repo cache write.")
+            return
+        cache_dir = write_repo_cache(
+            Path(repo_path),
+            exploration=exploration,
+            knobs=knobs,
+            metrics=metrics,
+            build=build,
+        )
+        print(
+            f"  -> repo cache written to {cache_dir}  "
+            f"({len(knobs)} knob(s), {len(metrics)} metric(s))"
+        )
+    except Exception as exc:
+        logger.warning("Repo cache write failed: %s", exc)
+
+
+def _emit_meta_findings(work_dir: Path, campaign: dict) -> None:
+    """Emit meta_findings.json at campaign end (issue #155).
+
+    Pure-Python deterministic emitter — zero LLM tokens. Reads on-disk
+    artifacts (ledger, principles, findings, retry_log, llm_metrics)
+    and writes a structured set of triagable lessons across three
+    streams. Best-effort: failure is logged but never blocks the
+    campaign from exiting.
+    """
+    try:
+        from orchestrator.meta_findings import emit_meta_findings, write_meta_findings
+        from orchestrator.validate import validate_meta_findings
+        payload = emit_meta_findings(work_dir, campaign)
+        target = write_meta_findings(work_dir, payload)
+        result = validate_meta_findings(work_dir)
+        if result["status"] == "fail":
+            logger.warning(
+                "meta_findings.json failed self-validation: %s", result["errors"],
+            )
+        n_lessons = len(payload.get("campaign_design_lessons") or [])
+        n_repo = len(payload.get("target_system_asks") or [])
+        n_nous = len(payload.get("nous_asks") or [])
+        print(
+            f"  -> {target}  "
+            f"({n_lessons} design lesson(s), {n_repo} repo ask(s), "
+            f"{n_nous} nous ask(s))"
+        )
+    except Exception as exc:
+        logger.warning("Meta-findings emission failed: %s", exc)
+
+
 def _write_metrics_summary(work_dir: Path) -> None:
     """Write llm_metrics_summary.json and print a one-liner. Never raises."""
     try:
@@ -288,6 +356,8 @@ def run_campaign(
         if outcome == IterationOutcome.COMPLETED:
             append_ledger_row(work_dir, i)
             print(f"\n  Campaign complete after {i} iteration(s).")
+            _emit_meta_findings(work_dir, campaign)
+            _write_repo_cache(work_dir, campaign)
             _generate_report(campaign, work_dir, model, agent=agent, timeout=timeout)
             _write_metrics_summary(work_dir)
             return
@@ -295,6 +365,8 @@ def run_campaign(
         if outcome == IterationOutcome.ABORTED:
             print(f"\n  Campaign aborted at iteration {i}.")
             print("  Engine state preserved for potential resume.")
+            _emit_meta_findings(work_dir, campaign)
+            _write_repo_cache(work_dir, campaign)
             _write_metrics_summary(work_dir)
             return
 
@@ -343,6 +415,8 @@ def run_campaign(
             engine = Engine(work_dir)
             engine.transition("DONE")
             print(f"\n  Campaign stopped after {i} iteration(s).")
+            _emit_meta_findings(work_dir, campaign)
+            _write_repo_cache(work_dir, campaign)
             _generate_report(campaign, work_dir, model, agent=agent, timeout=timeout)
             _write_metrics_summary(work_dir)
             return
@@ -354,6 +428,8 @@ def run_campaign(
         print(f"\n  Advancing to iteration {i + 1}...")
 
     print(f"\n  Campaign reached max_iterations ({max_iterations}).")
+    _emit_meta_findings(work_dir, campaign)
+    _write_repo_cache(work_dir, campaign)
     _generate_report(campaign, work_dir, model, agent=agent, timeout=timeout)
     _write_metrics_summary(work_dir)
 

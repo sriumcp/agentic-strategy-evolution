@@ -29,6 +29,20 @@ properties:
     type: string
     description: "Brief explanation of which arms were chosen and why."
 
+  complexity_tier:
+    type: integer
+    minimum: 1
+    maximum: 4
+    description: >
+      Iteration's complexity tier (issue #159). 1 = single mechanism +
+      single knob + treatment-vs-control; 2 = single mechanism + multi-knob
+      OR ablation OR dose-response; 3 = multi-mechanism interactions,
+      super-additivity; 4 = cross-system / cross-workload generalization.
+      Iteration N may use any tier <= N — so iter 1 is forced to tier 1.
+  tier_justification:
+    type: string
+    description: "Brief reason for the chosen tier given the iteration index and prior refutations."
+
   arms:
     type: array
     minItems: 1
@@ -49,6 +63,8 @@ $defs:
           - h-super-additivity
           - h-control-negative
           - h-robustness
+          - h-dose-response
+          - h-tradeoff
       component:
         type: string
         description: "Component name, used for h-ablation arms."
@@ -67,6 +83,63 @@ $defs:
       metadata:
         type: object
         description: "Optional domain-specific metadata for this arm."
+
+      # ─── H-dose-response fields (issue #157) ───────────────────────────
+      # Required when type == h-dose-response (cross-checked in
+      # orchestrator.validate). Schema keeps them optional to preserve
+      # additive-only backward compatibility for existing arm types.
+      knob:
+        type: string
+        minLength: 1
+        description: "Name of the knob being varied. h-dose-response only."
+      values:
+        type: array
+        minItems: 3
+        uniqueItems: true
+        items:
+          oneOf:
+            - { type: number }
+            - { type: string, minLength: 1 }
+        description: "Distinct knob settings to test. h-dose-response only; >= 3 values."
+      metric:
+        type: string
+        minLength: 1
+        description: "Observable metric whose response shape is being tested."
+      expected_shape:
+        type: string
+        enum:
+          - monotone_decreasing
+          - monotone_increasing
+          - u_shaped
+          - inverted_u
+          - saturating
+          - flat
+        description: "Predicted shape of metric vs. knob value."
+
+      # ─── H-tradeoff fields (issue #158) ────────────────────────────────
+      # Required when type == h-tradeoff (cross-checked in
+      # orchestrator.validate). The arm declares an intervention's
+      # improvement on `metric` and the maximum acceptable degradation
+      # of `secondary_metric` (in the named "worse" direction).
+      secondary_metric:
+        type: string
+        minLength: 1
+        description: "Cost metric paired with `metric` for h-tradeoff arms; must differ from `metric`."
+      secondary_budget:
+        type: number
+        minimum: 0
+        description: "Maximum acceptable degradation in secondary_metric, in the worse direction. h-tradeoff only."
+      secondary_direction:
+        type: string
+        enum: [increase, decrease]
+        description: "Which way is 'worse' for secondary_metric (e.g., increase for memory, decrease for accuracy)."
+      primary_change:
+        type: number
+        description: "Predicted directional change in `metric` (signed). h-tradeoff only."
+      intervention_ref:
+        type: string
+        description: "Optional reference to the intervention (other arm id or description)."
+
       code_changes:
         type: array
         description: "Optional code change intents. Planner says what and why, not how."

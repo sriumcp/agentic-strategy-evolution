@@ -74,6 +74,46 @@ Beyond tests, Nous itself must be frugal with tokens:
 5. Stack PRs when one logical change builds on another rather than waiting
    for merge — see `docs/plans/CHECKPOINT.md` for the pattern.
 
+## Graded-complexity tier discipline (issue #159)
+
+Each iteration's bundle declares an optional ``complexity_tier`` (1..4):
+
+| Tier | Description |
+|---|---|
+| 1 | single mechanism, single knob, treatment vs control |
+| 2 | single mechanism + multi-knob OR ablation OR dose-response on one knob |
+| 3 | multi-mechanism interactions, super-additivity, dose-response across knobs |
+| 4 | cross-system / cross-workload generalization, robustness across regimes |
+
+**Rule: iteration N may use any tier ≤ N.** Iter 1 → tier 1 only. Iter 2
+→ tier 1 or 2. Etc. Sophisticated hypotheses are allowed, just *deferred
+until simpler ones are ruled out*. The bundle's ``tier_justification``
+explains the chosen tier given the iteration index and prior refutations.
+
+The discipline is enforced through visibility, not refusal. The design
+gate (``orchestrator.complexity_tier.format_tier_summary``) prints the
+tier and prior-iteration tiers, and prominently flags jumps of more than
+one tier across iterations. Humans can override; agents cannot
+silently leap from tier 1 to tier 3.
+
+## Meta-findings emit at campaign end (issue #155)
+
+Every campaign's terminal transition writes `meta_findings.json` at the
+campaign work-dir. Three streams:
+
+1. `campaign_design_lessons` — how to structure future campaigns better.
+2. `target_system_asks` — what the target repo could improve.
+3. `nous_asks` — what Nous itself could improve.
+
+The emitter (`orchestrator.meta_findings.emit_meta_findings`) is **pure
+Python** — zero LLM tokens. Heuristics over `ledger.json`,
+`principles.json`, per-iteration `findings.json`, `retry_log.jsonl`,
+and `llm_metrics.jsonl` produce structured entries with concrete
+citations (iter-N, file path, tool name, error string, numeric
+measurement). The validator floor (`validate_evidence`) rejects
+aspirational platitudes regardless of source. See `docs/data-model.md`
+for the schema.
+
 ## See also
 
 - `docs/contributing/workflow.md` — full workflow doc.

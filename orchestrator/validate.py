@@ -3,6 +3,7 @@
 Usage:
     python -m orchestrator.validate design --dir runs/iter-1/
     python -m orchestrator.validate execution --dir runs/iter-1/
+    python -m orchestrator.validate meta-findings --dir <work_dir>/
 """
 import argparse
 import json
@@ -54,6 +55,64 @@ def _check_unexpected_files(iter_dir: Path) -> list[str]:
     return errors
 
 
+def _validate_typed_arm_fields(bundle: dict) -> list[str]:
+    """Cross-field rules per arm type that JSON Schema can't easily express.
+
+    H-dose-response (issue #157) requires knob, values (>=3 distinct),
+    metric, and expected_shape. JSON Schema accepts these as optional
+    so existing arm types stay valid; this function enforces them
+    when the arm type asks for them.
+
+    H-tradeoff (issue #158) requires metric, secondary_metric, and
+    a tradeoff prediction with secondary_budget — see #158's
+    extension to this function.
+    """
+    errors: list[str] = []
+    arms = bundle.get("arms") or []
+    if not isinstance(arms, list):
+        return errors
+    for i, arm in enumerate(arms):
+        if not isinstance(arm, dict):
+            continue
+        arm_type = arm.get("type")
+        if arm_type == "h-dose-response":
+            for field in ("knob", "values", "metric", "expected_shape"):
+                if field not in arm:
+                    errors.append(
+                        f"arms[{i}] (h-dose-response) missing required field {field!r}"
+                    )
+            values = arm.get("values")
+            if isinstance(values, list):
+                if len(values) < 3:
+                    errors.append(
+                        f"arms[{i}] (h-dose-response) has < 3 values "
+                        f"({len(values)}); dose-response needs >= 3."
+                    )
+                if len(values) != len(set(map(repr, values))):
+                    errors.append(
+                        f"arms[{i}] (h-dose-response) has duplicate values; "
+                        f"distinct knob settings required."
+                    )
+        elif arm_type == "h-tradeoff":
+            for field in (
+                "metric", "secondary_metric", "secondary_budget",
+                "secondary_direction",
+            ):
+                if field not in arm:
+                    errors.append(
+                        f"arms[{i}] (h-tradeoff) missing required field {field!r}"
+                    )
+            if (
+                arm.get("metric") is not None
+                and arm.get("metric") == arm.get("secondary_metric")
+            ):
+                errors.append(
+                    f"arms[{i}] (h-tradeoff): secondary_metric must differ "
+                    f"from primary metric (both = {arm.get('metric')!r})."
+                )
+    return errors
+
+
 def validate_design(iter_dir: Path) -> dict:
     """Check design artifacts exist and conform to schemas."""
     iter_dir = Path(iter_dir)
@@ -75,6 +134,7 @@ def validate_design(iter_dir: Path) -> dict:
             bundle = yaml.safe_load(bundle_path.read_text())
             schema = _load_yaml_schema("bundle.schema.yaml")
             jsonschema.validate(bundle, schema)
+            errors.extend(_validate_typed_arm_fields(bundle))
         except yaml.YAMLError as exc:
             errors.append(f"bundle.yaml is not valid YAML: {exc}")
         except jsonschema.ValidationError as exc:
@@ -212,24 +272,72 @@ def validate_execution(iter_dir: Path) -> dict:
     return {"status": "pass"}
 
 
+def validate_meta_findings(work_dir: Path) -> dict:
+    """Check meta_findings.json conforms to schema and citation floor.
+
+    The citation floor (``orchestrator.meta_findings.evidence_is_concrete``)
+    rejects entries whose ``evidence`` is a vague platitude. Schema does
+    minLength + enum; the floor catches anything that passes minLength
+    but is still aspirational.
+    """
+    work_dir = Path(work_dir)
+    errors: list[str] = []
+
+    target = work_dir / "meta_findings.json"
+    if not target.exists():
+        return {"status": "fail", "errors": [f"{target.name} not found at {work_dir}"]}
+
+    try:
+        payload = json.loads(target.read_text())
+    except json.JSONDecodeError as exc:
+        return {"status": "fail", "errors": [f"meta_findings.json is not valid JSON: {exc}"]}
+
+    try:
+        schema = _load_json_schema("meta_findings.schema.json")
+        jsonschema.validate(payload, schema)
+    except jsonschema.ValidationError as exc:
+        errors.append(f"meta_findings.json schema error: {exc.message}")
+
+    # Citation floor — applied to every evidence string in every stream.
+    from orchestrator.meta_findings import validate_evidence
+
+    for stream_name in ("campaign_design_lessons", "target_system_asks", "nous_asks"):
+        items = payload.get(stream_name) or []
+        if not isinstance(items, list):
+            continue
+        for i, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            evidence = item.get("evidence", "")
+            err = validate_evidence(evidence)
+            if err:
+                errors.append(f"{stream_name}[{i}]: {err}")
+
+    if errors:
+        return {"status": "fail", "errors": errors}
+    return {"status": "pass"}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Validate Nous artifacts for a given phase.",
     )
     parser.add_argument(
-        "phase", choices=["design", "execution"],
+        "phase", choices=["design", "execution", "meta-findings"],
         help="Which phase to validate",
     )
     parser.add_argument(
         "--dir", required=True, type=Path,
-        help="Path to the iteration directory (e.g., runs/iter-1/)",
+        help="Path to the iteration directory (or work_dir for meta-findings)",
     )
     args = parser.parse_args()
 
     if args.phase == "design":
         result = validate_design(args.dir)
-    else:
+    elif args.phase == "execution":
         result = validate_execution(args.dir)
+    else:
+        result = validate_meta_findings(args.dir)
 
     print(json.dumps(result, indent=2))
     sys.exit(0 if result["status"] == "pass" else 1)
