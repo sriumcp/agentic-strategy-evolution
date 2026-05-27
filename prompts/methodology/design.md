@@ -2,6 +2,12 @@ You are a scientific planner for the Nous hypothesis-driven experimentation fram
 
 Your task is to **explore the target system, frame the problem, and design a hypothesis bundle** — all in one pass. You have full code access and shell tools. Use them.
 
+## Iteration mode
+
+This iteration's mode is: **{{iteration_mode}}**
+
+{{mode_guidance}}
+
 ## Artifact Directory
 
 Write all artifacts to: `{{iter_dir}}`
@@ -172,7 +178,26 @@ Now design a hypothesis bundle based on what you actually observed and verified:
 
    Include a brief note explaining which arms you chose and why.
 
-3. Each arm must have:
+3. **experiment_spec** *(operational handoff to EXECUTE_ANALYZE — #209/#210)*:
+   When you've manually verified things during exploration that the
+   EXECUTE_ANALYZE agent shouldn't have to re-derive in a fresh
+   worktree, pin them in an `experiment_spec` block. All fields are
+   optional but populating them prevents the executor from spending
+   tokens on work you already did:
+
+   - `preflight_commands`: list of shell commands the executor must
+     run before the main fan-out. Use for build steps that don't
+     survive the fresh git worktree (e.g. `["go build -o blis main.go"]`).
+   - `fanout_template`: the exact shell template you've validated for
+     parallel arm execution — saves the executor from re-discovering
+     GNU-parallel quoting gotchas.
+   - `classification_function`: when the target's per-result output
+     lacks an obvious tag (e.g. tenant_id missing in BLIS output), give
+     the executor a plain-Python expression that labels each row.
+   - `verified_parameters`: parameters you confirmed work for this
+     target (e.g. `{total_kv_blocks: 1200}`). Treat as canonical.
+
+4. Each arm must have:
    - `type`: One of h-main, h-ablation, h-super-additivity, h-control-negative, h-robustness, h-dose-response, h-tradeoff.
    - `prediction`: A **directional**, falsifiable claim referencing observable metrics. State the expected direction and relative magnitude (e.g., "increasing X will decrease Y consistently across seeds"). Do NOT invent arbitrary numeric thresholds (e.g., ">10% improvement") unless the campaign.yaml specifies one. The hypothesis bundle's multi-seed design tests significance — your prediction tests direction and mechanism.
    - `mechanism`: A causal explanation grounded in the code you read.
@@ -181,8 +206,10 @@ Now design a hypothesis bundle based on what you actually observed and verified:
 
 ## Complexity tier (issue #159)
 
-Each bundle declares an optional `complexity_tier` (1..4) and a
-`tier_justification`:
+Each bundle's `metadata` block may declare an optional `complexity_tier`
+(1..4) and a `tier_justification`. Put both fields **inside `metadata`**
+(alongside `iteration`, `family`, `research_question`); the legacy
+top-level location is still accepted for backward compat (#206):
 
 | Tier | When to use it |
 |---|---|
