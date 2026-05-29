@@ -79,6 +79,30 @@ export OPENAI_BASE_URL=https://your-litellm-proxy.example.com  # or any OpenAI-c
 
 If you're using Anthropic directly via a LiteLLM proxy, point both vars at the proxy. If these aren't set, gate summaries and report generation are skipped (non-fatal). The campaign still runs — you just won't get LLM-generated summaries at the gates or a final report.
 
+**Recommended: relocate campaign artifacts outside the target repo (#239).**
+
+By default, Nous creates each campaign's working directory at `<target_repo>/.nous/<run_id>/`. That puts campaign output (state, ledger, principles, JSON results, findings) inside the target repo's working tree as untracked files — which means `git stash -u` silently captures them, `git status` shows thousands of unrelated entries, and `git add .` accidentally stages campaign content. To avoid this, set:
+
+```bash
+# Add to your shell rc (.zshrc / .bashrc):
+export NOUS_CAMPAIGN_PARENT=~/Documents/Projects/nous-campaigns
+```
+
+When `NOUS_CAMPAIGN_PARENT` is set, campaign artifacts live at `$NOUS_CAMPAIGN_PARENT/<run_id>/` — wholly outside the target repo. Code worktrees (per-arm BLIS branches, #133) continue to live at `<target>/.nous-experiments/<run_id>/<arm>/` because they ARE code FOR the target. The target repo's working tree stays clean. Backward-compat: when the env var is unset, the resolved `work_dir` is unchanged — `<repo_path>/.nous/<run_id>/`, exactly as today.
+
+The resolved absolute `work_dir` and `repo_path` are recorded in each campaign's `state.json` so the campaign location and target survive env-var changes between runs. `nous resume` and `nous status` look up campaigns at both the env-var location AND the legacy location, so existing pre-#239 campaigns continue to work without immediate migration.
+
+**Migrating existing campaigns** to the new location is a one-time operation per campaign:
+
+```bash
+# 1. Set the env var first (in your shell rc).
+# 2. Move existing campaign(s):
+mv <target_repo>/.nous/<run_id> $NOUS_CAMPAIGN_PARENT/<run_id>
+# 3. Continue using the campaign as before. Nous will find it at the new location.
+```
+
+state.json's recorded `work_dir` will be stale until the campaign's next setup; that's fine — `find_existing_work_dir` checks the actual directory existence, not just state.json's recorded path.
+
 ### 1. Install Nous
 
 ```bash
@@ -139,7 +163,7 @@ target_system:
   repo_path: /path/to/your/repo
 ```
 
-When `repo_path` is set, the campaign directory is created inside the target repo at `.nous/<run_id>/`. All artifacts live there.
+When `repo_path` is set, the campaign directory is created at `$NOUS_CAMPAIGN_PARENT/<run_id>/` if you've set that env var (recommended — see [Environment setup](#environment-setup) above), or otherwise at the legacy `<target_repo>/.nous/<run_id>/`. All artifacts live there.
 
 To discover the full schema (required vs optional fields, descriptions
 verbatim from the schema source), run:
