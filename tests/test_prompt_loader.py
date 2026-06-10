@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from orchestrator.prompt_loader import PromptLoader
+from orchestrator.llm_dispatch import _WORKTREE_DESIGN_CONSTRAINT
 
 
 @pytest.fixture()
@@ -159,6 +160,7 @@ class TestRealMethodologyThinTemplates:
             # #212: rehearsal/real mode rendered into the design prompt.
             "iteration_mode": "real",
             "mode_guidance": "(real-mode guidance text)",
+            "worktree_constraint": _WORKTREE_DESIGN_CONSTRAINT,
         }
 
     def _ctx_for_execute(self) -> dict[str, str]:

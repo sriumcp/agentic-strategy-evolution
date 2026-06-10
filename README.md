@@ -190,6 +190,8 @@ Optional blocks worth knowing about:
 
 The planner explores the codebase to discover metrics, knobs, and execution methods. You can optionally provide `observable_metrics` and `controllable_knobs` as hints — see [examples/campaign.yaml](examples/campaign.yaml) for all options.
 
+If your target is a *running* system rather than a codebase (a cluster, a deployed service, a scratch directory that isn't a git repo), set `target_system.live_target: true`. The executor then runs directly in `repo_path` with no per-iteration `git worktree`, and the planner is told up front that arms must be probes — see [docs/quickstart.md#live-target-campaigns-live_target-true](docs/quickstart.md#live-target-campaigns-live_target-true) for details.
+
 ### 5. Run a campaign
 
 ```bash
@@ -379,6 +381,28 @@ When DESIGN exits without producing `bundle.yaml` / `problem.md` /
 the four common causes — `max_turns` exhaustion, agent ran the
 experiment in DESIGN, API stall, transport failure — each with a
 concrete file to inspect.
+
+### 7. Extract campaign knowledge
+
+After a campaign completes, extract its knowledge into the wiki for cross-campaign reuse:
+
+```bash
+# Extract knowledge, index into registry, generate interactive visualization
+/post-campaign path/to/.nous/my-campaign
+
+# Re-render a campaign's interactive HTML visualization
+/visualize-campaign path/to/.nous/my-campaign
+
+# Render the cross-campaign knowledge graph
+/visualize-registry
+
+# Get recommendations for your next campaign based on prior findings
+/suggest-next /path/to/repo "your research question"
+```
+
+The wiki skills turn raw `ledger.json` and `principles.json` into structured knowledge (dead-ends, frontiers, untested interactions) and interactive HTML visualizations. Knowledge compounds across campaigns — `/suggest-next` uses findings from all indexed campaigns to recommend high-value next experiments.
+
+See [docs/nous-wiki.md](docs/nous-wiki.md) for detailed usage, the full data model, and script documentation.
 
 ### Run tests
 

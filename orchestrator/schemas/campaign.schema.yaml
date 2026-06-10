@@ -101,6 +101,14 @@ properties:
           resolves under repo_path; absolute paths and ``..`` traversal
           are rejected at worktree creation. Source must exist in main
           at the time of worktree creation.
+      live_target:
+        type: boolean
+        description: "If true, the executor runs directly in repo_path with no per-iteration git worktree. Use for campaigns that probe a running system (cluster, service, dataset) where there is no code to evolve. Bundles must contain no code_changes arms."
+
+  metadata:
+    type: object
+    additionalProperties: true
+    description: "User-defined metadata (tags, goal, etc.). Copied to work dir at init."
 
   models:
     type: object

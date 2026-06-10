@@ -19,11 +19,13 @@ Dispatch backends:
     The legacy ``api`` backend was removed in #183.
 """
 import argparse
+import importlib.metadata as importlib_metadata
 import json
 import logging
 import os
 import re
 import shutil
+import subprocess
 import sys
 from datetime import datetime, timezone
 from enum import Enum
@@ -724,7 +726,69 @@ def _merge_principles(work_dir: Path, iter_dir: Path) -> None:
     atomic_write(principles_path, json.dumps(store, indent=2) + "\n")
 
 
-def setup_work_dir(run_id: str, repo_path: str | None = None) -> Path:
+def _capture_runtime_meta(repo_path: str | None) -> dict:
+    """Capture runtime metadata at campaign init time.
+
+    Returns a dict with target_repo, target_commit, nous_version, started_at.
+    Each git/importlib call is wrapped individually — failures log a warning
+    and yield null for that field.
+    """
+    meta: dict = {
+        "target_repo": None,
+        "target_commit": None,
+        "nous_version": None,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # Target repo commit
+    if repo_path:
+        try:
+            meta["target_commit"] = subprocess.check_output(
+                ["git", "-C", repo_path, "rev-parse", "HEAD"],
+                text=True, stderr=subprocess.DEVNULL,
+            ).strip() or None
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+            logger.warning("Could not capture target_commit from %s", repo_path)
+
+        # Target repo remote (org/repo identifier)
+        try:
+            remote = subprocess.check_output(
+                ["git", "-C", repo_path, "remote", "get-url", "origin"],
+                text=True, stderr=subprocess.DEVNULL,
+            ).strip()
+            if remote.startswith("git@github.com:"):
+                # SSH: git@github.com:org/repo.git
+                meta["target_repo"] = remote.split(":")[-1].removesuffix(".git")
+            elif "github.com/" in remote:
+                # HTTPS: https://github.com/org/repo.git
+                meta["target_repo"] = remote.split("github.com/")[-1].removesuffix(".git")
+            else:
+                meta["target_repo"] = remote or None
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+            logger.warning("Could not capture target_repo from %s", repo_path)
+
+    # Nous version: prefer package metadata, fall back to git SHA
+    try:
+        meta["nous_version"] = importlib_metadata.version("nous")
+    except importlib_metadata.PackageNotFoundError:
+        nous_dir = Path(__file__).resolve().parent
+        try:
+            meta["nous_version"] = subprocess.check_output(
+                ["git", "-C", str(nous_dir), "rev-parse", "HEAD"],
+                text=True, stderr=subprocess.DEVNULL,
+            ).strip() or None
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+            logger.warning("Could not determine nous_version")
+
+    return meta
+
+
+def setup_work_dir(
+    run_id: str,
+    repo_path: str | None = None,
+    campaign_path: Path | None = None,
+    campaign: dict | None = None,
+) -> Path:
     """Create and initialize a working directory from templates.
 
     See ``orchestrator/work_dir_resolver.py`` for the canonical
@@ -747,6 +811,11 @@ def setup_work_dir(run_id: str, repo_path: str | None = None) -> Path:
     Also writes a per-campaign ``.claude/settings.json`` permission policy
     (issue #135) so dispatchers can pass ``--settings <path>`` instead of
     ``--dangerously-skip-permissions``.
+
+    If campaign_path is provided, writes an enriched copy of campaign.yaml
+    into the work directory with a runtime: block (target_repo, target_commit,
+    nous_version, started_at). Only written on fresh init to avoid clobbering
+    on resume.
 
     Raises:
         ValueError: ``NOUS_CAMPAIGN_PARENT`` set to empty/whitespace, OR
@@ -843,6 +912,20 @@ def setup_work_dir(run_id: str, repo_path: str | None = None) -> Path:
             pre_tool_use_hook_path=plan_enforcer if plan_enforcer.exists() else None,
         )
         write_campaign_settings(settings_path, settings)
+
+    # Write enriched campaign.yaml copy on fresh init only
+    enriched_path = work_dir / "campaign.yaml"
+    if campaign_path and campaign and not enriched_path.exists():
+        try:
+            runtime_meta = _capture_runtime_meta(repo_path)
+            enriched = dict(campaign)
+            enriched["runtime"] = runtime_meta
+            atomic_write(
+                enriched_path,
+                yaml.safe_dump(enriched, default_flow_style=False, sort_keys=False),
+            )
+        except (OSError, yaml.YAMLError) as exc:
+            logger.warning("Could not write enriched campaign.yaml: %s", exc)
 
     return work_dir
 
@@ -1034,6 +1117,13 @@ def run_iteration(
         raise ValueError(
             f"Unknown agent backend: {agent!r}. Valid values: 'sdk', 'inline'."
         )
+
+    # Validate the campaign once, up front. The staticmethod on LLMDispatcher
+    # is also called from its constructor, but inline-agent mode never builds
+    # an LLMDispatcher — without this call, a non-bool `live_target` value
+    # would slip past validation and silently coerce via bool() below.
+    from orchestrator.llm_dispatch import validate_campaign
+    validate_campaign(campaign)
 
     engine = Engine(work_dir)
     repo_path = campaign.get("target_system", {}).get("repo_path")
@@ -1253,7 +1343,10 @@ def run_iteration(
             cli_dispatcher.model = _model_for("execute_analyze")
             cli_dispatcher.max_turns = _max_turns_for("execute_analyze")
         exec_dispatcher = cli_dispatcher or llm_dispatcher
-        if repo_path:
+        live_target = bool(
+            campaign.get("target_system", {}).get("live_target", False)
+        )
+        if repo_path and not live_target:
             from orchestrator.worktree import (
                 create_experiment_worktree,
                 remove_experiment_worktree,
@@ -1285,6 +1378,12 @@ def run_iteration(
                         raise RuntimeError(msg)
             except ImportError:
                 pass
+        elif repo_path:
+            # Live-target mode: executor runs directly in repo_path. The
+            # target system is running (cluster, service, dataset) and there
+            # is nothing to isolate — bundles must contain no code_changes arms.
+            experiment_dir = Path(repo_path)
+            print(f"  Live target: executor runs in {experiment_dir}")
         if cli_dispatcher:
             import contextlib
             ctx = cli_dispatcher.override_cwd(experiment_dir) if experiment_dir else contextlib.nullcontext()
@@ -1509,7 +1608,10 @@ def main() -> None:
 
     run_id = args.run_id or campaign.get("run_id") or campaign_path.parent.name + "-run"
     repo_path = campaign.get("target_system", {}).get("repo_path")
-    work_dir = setup_work_dir(run_id, repo_path=repo_path)
+    work_dir = setup_work_dir(
+        run_id, repo_path=repo_path,
+        campaign_path=campaign_path, campaign=campaign,
+    )
     print(f"Working directory: {work_dir.resolve()}")
 
     run_iteration(

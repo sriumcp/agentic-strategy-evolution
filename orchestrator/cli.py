@@ -235,7 +235,10 @@ def _cmd_run(args):
                 file=sys.stderr,
             )
 
-    work_dir = setup_work_dir(run_id, repo_path=repo_path)
+    work_dir = setup_work_dir(
+        run_id, repo_path=repo_path,
+        campaign_path=campaign_path, campaign=campaign,
+    )
 
     max_iterations = args.max_iterations if args.max_iterations is not None else campaign.get("max_iterations", 10)
     # #188: --bundle / --problem-md / --handoff-md only apply to iter-1.
